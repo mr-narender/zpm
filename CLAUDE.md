@@ -1,0 +1,148 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+```bash
+make all      # Format all files with beautysh (indent-size 2, fnpar style)
+make clean    # Remove .zwc compiled files
+make test     # Run zsh tests/run.zsh (all tests/**/*.test.zsh)
+
+# Single test file
+zsh tests/unit/plugin-name.test.zsh
+
+# Manual testing: clear cache and restart shell
+rm -rf "${TMPDIR:-/tmp}/zsh-${UID}"
+exec zsh
+
+# Enable debug logging
+DEBUG=zpm exec zsh
+```
+
+## Architecture
+
+ZPM is a **cache-first** zsh plugin manager. On first run it installs plugins, generates a cache file, and compiles it. On subsequent runs, only the cache is sourced (~6ms startup).
+
+### Boot flow
+
+```
+zpm.zsh (entry point)
+  ├── Cache exists? → source $_ZPM_CACHE (fast path)
+  └── No cache? → eval lib/init.zsh + lib/imperative.zsh (slow path)
+        ├── init.zsh: declare arrays, autoload all @zpm-* functions
+        ├── imperative.zsh: mkdir, detect parallel runner, load helpers,
+        │   schedule @zpm-background-initialization via sched +1
+        └── User calls `zpm load ...` which triggers @zpm-load-plugins
+```
+
+### Core loading pipeline
+
+```
+zpm load <plugin-spec>
+  → @zpm-load-plugins       # batch entry point
+    → @zpm-get-plugin-name   # extract name from spec
+    → @zpm-get-plugin-path   # resolve install path
+    → @zpm-launch-plugin-helper install  # parallel install if missing
+    → @zpm-initialize-plugin # parse tags, add to fpath/PATH, source
+```
+
+After all plugins load, `@zpm-background-initialization` generates two cache files:
+- `$ZSH_TMP_DIR/zpm-cache.zsh` — sync plugins (loaded on startup)
+- `$ZSH_TMP_DIR/zpm-cache-async.zsh` — async plugins (scheduled)
+
+Both are zcompiled by `@zpm-compile`.
+
+Each plugin is emitted into the cache as `(){ local ZERO=<file>; source <file>; }`.
+Plugin bodies are **not** inlined: a plugin that resolves its own location (`$0`, `%N`,
+`%x`) must see its own file path, not the cache's — inlining made `%N` expand to
+`(anon)` and broke zsh-syntax-highlighting on every start after the first (issue #46).
+The anonymous function is still required: it is the scope `@zpm-source` gives the plugin
+on the cold path, without which `emulate -L zsh` and top-level `local` leak into the
+user's shell.
+
+### Key data structures
+
+| Variable | Type | Purpose |
+|---|---|---|
+| `_ZPM_plugins_full` | assoc array | plugin name → full spec string |
+| `_ZPM_file_for_source` | assoc array | plugin name → source file path |
+| `_ZPM_plugins_for_source` | array | plugins to include in sync cache |
+| `_ZPM_plugins_for_async_source` | array | plugins for async cache |
+| `_ZPM_autoload` | array | functions to `autoload -Uz` |
+
+### File layout
+
+- `zpm.zsh` — entry point (40 lines), sets env vars, loads cache or initializes
+- `lib/init.zsh` — declares data structures, autoloads all core functions
+- `lib/imperative.zsh` — first-run setup: dirs, parallel runner detection, helpers load
+- `functions/@zpm-*` — one function per file, all autoloaded (this is the core logic)
+- `functions/zpm` — the `zpm` command itself (dispatches to subcommands)
+- `functions/_zpm` — zsh completions for the `zpm` command
+- `bin/@zpm-plugin-helper` — standalone script for install/upgrade (runs in parallel)
+
+### Plugin type system
+
+Plugins are specified as `@type/user/plugin-name,tag1,tag2:param`. Types: `@github` (default), `@gitlab`, `@bitbucket`, `@git`, `@omz`, `@gist`, `@remote`, `@dir`, `@file`, `@exec`, `@empty`.
+
+Tags: `apply:source:path:fpath`, `async`, `source:file`, `path:dir`, `fpath:dir`, `autoload:fn1:fn2`, `origin:url`, `hook:cmd`, `destination:bin`.
+
+### Parallel execution
+
+Plugin install/upgrade runs via one of (detected in order): GNU Parallel, Rush, xargs. Override with `_ZPM_PARALLEL_RUNNER=parallel|rush|xargs`.
+
+### Known workarounds
+
+Hardcoded special handling exists in `@zpm-get-plugin-file-path` and `@zpm-background-initialization` for: powerlevel10k, zsh-syntax-highlighting, zsh-history-substring-search, sindresorhus/pure.
+
+## Conventions
+
+- All core functions are prefixed `@zpm-` and live in `functions/` as individual files for autoloading
+- Follows PMSPEC `0fbs` (Zsh Plugin Standard)
+- The `ZERO` (`$0`) variable is set during plugin sourcing so plugins can find their own directory
+- The `source` builtin is overridden during init to auto-zcompile files
+- Cache invalidation: conditions stored in `$ZSH_TMP_DIR/is`, regenerated on mismatch or `zpm clean`
+
+## Testing
+
+- `tests/lib/harness.zsh` provides `assert_eq`, `assert_match`, `assert_fail`; each test file
+  is runnable on its own and is also sourced by `tests/run.zsh`.
+- `tests/unit/` — one file per function; `tests/integration/` — load/cache/tag behaviour in a
+  temp `ZSH_TMP_DIR`; `tests/startup/` — startup benchmarks; `tests/fixtures/` — fake plugins.
+- Every fix or feature gets a test. Never weaken or delete an existing assertion to get green.
+- `tests/run.zsh` exits 1 if any assertion failed and prints `PASS=N FAIL=M`; it ends with an
+  explicit `harness_finish`, because zsh < 5.7 ignores any exit status set from an EXIT trap.
+  A single test file run on its own gets its exit status from `TRAPEXIT` (zsh >= 5.7 only).
+  `FAIL: (intentional) ...` is the harness self-test and is expected.
+- Fixture directories need at least one tracked file, because git drops empty dirs and CI
+  checkouts would lack them.
+- CI (`.github/workflows/ci.yml`) runs on `ubuntu-latest` and `macos-latest` for pushes and PRs
+  to `main`/`next`. Runs for PRs from forks wait for maintainer approval (`action_required`).
+
+## Portability
+
+ZPM runs on zsh >= 5.1 on Linux (GNU coreutils), macOS (BSD userland), and busybox/Android;
+CI covers all of these (`zshusers/zsh:5.1.1` and `alpine` containers).
+- zsh 5.0 lacks array assignment in `local`/`typeset` (`local a=(...)`), which zpm uses widely.
+- Do not use GNU-only options (`cp --remove-destination`, `sed -i` without a suffix,
+  `readlink -f`, `stat -c`, ...). If one is needed, probe for it — see `@zpm-addfpath` (#71).
+- macOS `TMPDIR` lives under `/var`, which resolves to `/private/var`; compare resolved paths.
+- Prefer zsh builtins and parameter expansion over external commands.
+
+## Startup cost
+
+The warm path (`zpm.zsh` → cache) must not fork. `lib/init.zsh` is re-sourced from the async
+cache on **every** warm start (`@zpm-background-initialization`), so anything placed there runs in
+every new shell. Detect environment features lazily in the function that needs them.
+
+## Branches, PRs, releases
+
+- `main` — released code, tagged `vX.Y.Z`. `next` — integration branch for the next release.
+- Features go to `next`. Bug fixes may target `main`; after merging, `main` is merged back
+  into `next`.
+- Every user-visible change gets a line in the README `## Changelog` under `- next`, with PR
+  and author links.
+- Accepting a PR: `.claude/skills/accept-pr/SKILL.md`. Cutting a release / version bump:
+  `.claude/skills/release/SKILL.md`.
+- Merge PRs with merge commits (`gh pr merge --merge`). Push, merge, tag, and release only after
+  the maintainer confirms.
