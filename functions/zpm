@@ -7,15 +7,15 @@ if [[ "$1" == 'load' ]]; then
 fi
 
 if [[ "$1" == 'if' ]]; then
-  if check-if "$2"; then
-    shift 2
+  if [[ "${is[$2]}" == '1' ]] ; then
+	  shift 2
     zpm "$@"
   fi
   return 0
 fi
 
 if [[ "$1" == 'if-not' ]]; then
-  if ! check-if "$2"; then
+  if [[ "${is[$2]}" == '0' ]]; then
     shift 2
     zpm "$@"
   fi
@@ -30,6 +30,31 @@ fi
 
 if [[ "$1" == 'c' || "$1" == 'cl' || "$1" == 'clean' ]]; then
   @zpm-clean
+  return 0
+fi
+
+if [[ "$1" == 'info' ]]; then
+  shift
+  zpm-info "$@"
+  return 0
+fi
+
+if [[ "$1" == 'list' || "$1" == 'ls' ]]; then
+  shift
+  zpm-info "$@"
+  return 0
+fi
+
+if [[ "$1" == 'readme' ]]; then
+  shift
+  zpm-readme "$@"
+  return 0
+fi
+
+if [[ "$1" == 'link' ]]; then
+  shift
+  zpm-link "$@"
+  return 0
 fi
 
 if is-callable "zpm-$1"; then
