@@ -204,6 +204,8 @@ zpm-zsh/create-zsh-plugin
 
 ## Installation
 
+Requires zsh 5.1 or newer and `git`. Works on Linux, macOS, and busybox-based systems.
+
 Add the following to your `~/.zshrc`:
 
 ```sh
@@ -567,10 +569,15 @@ When contributing changes, add information about them to the changelog in the **
 - [x] Improve readme
   - [x] Describe installation process
   - [x] Describe all tags, plugin types, and configuration options
-- [ ] Improve completions
-  - [ ] Now `zpm load`, `zpm upgrade` or `zpm subcommand` will complete only one argument
+- [x] Improve completions
+  - [x] Now `zpm load`, `zpm upgrade` or `zpm subcommand` will complete only one argument
 
 ## Changelog
+
+- next
+
+  - Complete every argument of `zpm load`, `zpm upgrade`, `zpm info`, `zpm readme` and `zpm link`, not only the first; skip plugins already typed
+  - Declare zsh 5.1 as the minimum supported version and test it, along with busybox (Alpine), in CI
 
 - 6.2
 
